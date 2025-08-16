@@ -4,24 +4,19 @@ set -euo pipefail
 PROJECT_NAME="${1:-lattice}"
 ROOT_DIR="$PROJECT_NAME"
 
-# -----------------------------
-# Preflight (macOS-friendly)
-# -----------------------------
-need() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "Error: '$1' not found. Please install it first." >&2
-    exit 1
-  }
-}
-need bash
-need cargo
-command -v git >/dev/null 2>&1 || echo "Note: 'git' not found; skipping initial commit."
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Error: '$1' not found." >&2; exit 1; }; }
+need bash; need cargo; command -v git >/dev/null 2>&1 || echo "Note: git not found; skipping commit."
 
 echo "Scaffolding monorepo at: $ROOT_DIR"
 
+# ---------- helpers ----------
 mk_lib_crate () {
-  local path="$1"
-  cargo new --lib "$path" --vcs none >/dev/null
+  local path="$1"; local pkg="${2:-}"
+  if [[ -n "${pkg}" ]]; then
+    cargo new --lib "$path" --name "$pkg" --vcs none >/dev/null
+  else
+    cargo new --lib "$path" --vcs none >/dev/null
+  fi
   cat >> "$path/Cargo.toml" <<'EOF'
 
 [package]
@@ -42,8 +37,7 @@ EOF
 }
 
 mk_bin_crate () {
-  local path="$1"
-  local name; name="$(basename "$path")"
+  local path="$1"; local name; name="$(basename "$path")"
   cargo new --bin "$path" --vcs none >/dev/null
   cat >> "$path/Cargo.toml" <<'EOF'
 
@@ -63,13 +57,16 @@ EOF
 }
 
 append_workspace_member () {
-  printf '  "%s",\n' "$1" >> "$ROOT_DIR/Cargo.members"
+  printf '  "%s",\n' "$1" >> "Cargo.members"
 }
 
+# ---------- root ----------
 mkdir -p "$ROOT_DIR"
 pushd "$ROOT_DIR" >/dev/null
 
-# Root workspace
+# create the accumulator file *before* first append
+: > Cargo.members
+
 cat > Cargo.toml <<'EOF'
 [workspace]
 resolver = "2"
@@ -106,7 +103,6 @@ node_modules
 .idea
 .vscode
 Cargo.members
-# keep placeholders
 !.keep
 !README.md
 EOF
@@ -115,63 +111,40 @@ cat > README.md <<EOF
 # $PROJECT_NAME
 
 Programmable multi-tenant API Gateway + Zero-Trust Access Proxy.
-
-- Data plane: \`/gateway\`
-- Control plane: \`/control-plane\`
-- Console UI: \`/console\`
-- Contracts (source of truth): \`/contracts\`
-- Tooling/CI/Docs included.
-
-Start with TDD; see \`/docs/adr\`.
 EOF
 
-# ---------------- GATEWAY ----------------
-GATEWAY_LIBS=(core proxy authn authz limits routing transforms observability snapshot plugin-sdk plugin-host tls errors commons)
-for c in "${GATEWAY_LIBS[@]}"; do
-  mk_lib_crate "gateway/crates/$c"
-  append_workspace_member "gateway/crates/$c"
+# ---------- gateway ----------
+# Use a custom package name for "core" to avoid stdlib name warning.
+mk_lib_crate "gateway/crates/core" "gateway-core";          append_workspace_member "gateway/crates/core"
+for c in proxy authn authz limits routing transforms observability snapshot plugin-sdk plugin-host tls errors commons
+do
+  mk_lib_crate "gateway/crates/$c";                         append_workspace_member "gateway/crates/$c"
 done
+mk_bin_crate "gateway/bin/gatewayd";                        append_workspace_member "gateway/bin/gatewayd"
+mkdir -p gateway/tests/integration; : > gateway/tests/integration/.keep; echo "# Gateway tests" > gateway/tests/README.md
 
-mk_bin_crate "gateway/bin/gatewayd"
-append_workspace_member "gateway/bin/gatewayd"
-
-mkdir -p gateway/tests/integration
-: > gateway/tests/integration/.keep
-echo "# Gateway tests" > gateway/tests/README.md
-
-# ---------------- CONTROL PLANE ----------------
-CP_LIBS=(domain storage events contracts)
-for c in "${CP_LIBS[@]}"; do
-  mk_lib_crate "control-plane/crates/$c"
-  append_workspace_member "control-plane/crates/$c"
+# ---------- control-plane ----------
+for c in domain storage events contracts
+do
+  mk_lib_crate "control-plane/crates/$c";                   append_workspace_member "control-plane/crates/$c"
 done
-
-CP_SERVICES=(admin-api distributor idp secrets auditor)
-for s in "${CP_SERVICES[@]}"; do
-  mk_bin_crate "control-plane/services/$s"
-  append_workspace_member "control-plane/services/$s"
+for s in admin-api distributor idp secrets auditor
+do
+  mk_bin_crate "control-plane/services/$s";                 append_workspace_member "control-plane/services/$s"
 done
-
 mkdir -p control-plane/migrations control-plane/tests
-: > control-plane/migrations/.keep
-: > control-plane/tests/.keep
+: > control-plane/migrations/.keep; : > control-plane/tests/.keep
 echo "# Control plane" > control-plane/README.md
 
-# ---------------- CONSOLE ----------------
+# ---------- console ----------
 mkdir -p console/app console/components console/features console/lib console/e2e
 cat > console/README.md <<'EOF'
 # Console (UI)
-
 Next.js + Tailwind + shadcn/ui recommended.
-Generate client from /contracts/openapi.
 EOF
-: > console/app/.keep
-: > console/components/.keep
-: > console/features/.keep
-: > console/lib/.keep
-: > console/e2e/.keep
+: > console/app/.keep; : > console/components/.keep; : > console/features/.keep; : > console/lib/.keep; : > console/e2e/.keep
 
-# ---------------- CONTRACTS ----------------
+# ---------- contracts ----------
 mkdir -p contracts/openapi/v1 contracts/proto/v1 contracts/schemas/snapshot/v1 contracts/schemas/policy/v1 contracts/plugin
 cat > contracts/openapi/v1/admin-api.yaml <<'EOF'
 openapi: 3.1.0
@@ -202,29 +175,22 @@ cat > contracts/plugin/manifest.schema.json <<'EOF'
 EOF
 echo "# Contracts" > contracts/README.md
 
-# ---------------- PLUGINS ----------------
+# ---------- plugins ----------
 mkdir -p plugins/rust plugins/wasm
-: > plugins/.keep
-: > plugins/rust/.keep
-: > plugins/wasm/.keep
+: > plugins/.keep; : > plugins/rust/.keep; : > plugins/wasm/.keep
 echo "# Plugins playground" > plugins/README.md
 
-# ---------------- TOOLING / DOCS / CI ----------------
+# ---------- tooling / docs / ci ----------
 mkdir -p tooling/helm tooling/k6 tooling/devcontainer tooling/scripts
-: > tooling/helm/.keep
-: > tooling/k6/.keep
-: > tooling/devcontainer/.keep
-: > tooling/scripts/.keep
+: > tooling/helm/.keep; : > tooling/k6/.keep; : > tooling/devcontainer/.keep; : > tooling/scripts/.keep
 echo "# Tooling" > tooling/README.md
 
 mkdir -p docs/adr docs/runbooks docs/design
 cat > docs/adr/0001-project-structure.md <<'EOF'
 # ADR-0001: Project Structure
-We use a monorepo with clear bounded contexts, versioned contracts, and independent deployables.
-Contracts are the single source of truth; plugins sit behind a versioned SDK.
+We use a monorepo with bounded contexts, versioned contracts, and independent deployables.
 EOF
-: > docs/runbooks/.keep
-: > docs/design/.keep
+: > docs/runbooks/.keep; : > docs/design/.keep
 
 mkdir -p .github/workflows
 cat > .github/workflows/ci.yml <<'EOF'
@@ -242,7 +208,6 @@ jobs:
         run: cargo test --workspace --all-targets -- --nocapture
 EOF
 
-# Makefile (no GNU find)
 cat > Makefile <<'EOF'
 .PHONY: init build test fmt clippy tree
 init: ; cargo --version
@@ -250,29 +215,25 @@ build: ; cargo build --workspace --all-targets
 test: ; cargo test --workspace --all-targets -- --nocapture
 fmt: ; cargo fmt --all
 clippy: ; cargo clippy --workspace --all-targets -- -D warnings
-# Portable tree using Python (works on macOS & Linux)
 tree:
 \tpython - <<'PY'
 import os
 max_depth = 4
 for root, dirs, files in os.walk('.', topdown=True):
     depth = root.count(os.sep)
-    if depth > max_depth: 
+    if depth > max_depth:
         dirs[:] = []
         continue
     print(root)
 PY
 EOF
 
-# ---------------- Insert workspace members into Cargo.toml (BSD sed) ----------------
-if [[ -f Cargo.members ]]; then
-  # macOS/BSD sed requires a space before the backup suffix
-  sed -i .bak '/# <MEMBERS>/r Cargo.members' Cargo.toml
-  sed -i .bak '/# <MEMBERS>/d' Cargo.toml
-  rm -f Cargo.members Cargo.toml.bak
-fi
+# ---------- insert workspace members (BSD sed) ----------
+sed -i .bak '/# <MEMBERS>/r Cargo.members' Cargo.toml
+sed -i .bak '/# <MEMBERS>/d' Cargo.toml
+rm -f Cargo.members Cargo.toml.bak
 
-# Git init (optional)
+# ---------- git init ----------
 if command -v git >/dev/null 2>&1; then
   git init >/dev/null 2>&1 || true
   git add . >/dev/null 2>&1 || true
@@ -280,4 +241,4 @@ if command -v git >/dev/null 2>&1; then
 fi
 
 popd >/dev/null
-echo "Done ✅  Try: cd $ROOT_DIR && make tree && make build && make test"
+echo "Done ✅  Next: cd $ROOT_DIR && make tree && make build && make test"
